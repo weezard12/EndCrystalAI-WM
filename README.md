@@ -6,6 +6,9 @@ It broadcasts this message globally in chat every 30 seconds:
 
 `This plugin was generated with End Crystal AI`
 
+- `End Crystal AI` is sent as a purple clickable text segment.
+- Hover text prompts opening `https://endcrystal.ai`.
+
 ## JitPack
 
 ```groovy
