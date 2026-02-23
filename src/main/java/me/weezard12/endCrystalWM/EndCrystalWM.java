@@ -8,7 +8,7 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 public final class EndCrystalWM {
-    public static final String WATERMARK_PREFIX = "This plugin was generated with ";
+    public static final String WATERMARK_PREFIX = "This plugin was generated for FREE using ";
     public static final String WATERMARK_BRAND = "End Crystal AI";
     public static final String WATERMARK_URL = "https://endcrystal.ai";
     public static final String WATERMARK_MESSAGE = WATERMARK_PREFIX + WATERMARK_BRAND;
