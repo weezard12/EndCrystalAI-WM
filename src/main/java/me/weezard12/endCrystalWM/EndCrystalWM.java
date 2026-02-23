@@ -6,6 +6,7 @@ import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class EndCrystalWM {
     public static final String WATERMARK_PREFIX = "This plugin was generated for FREE using ";
@@ -16,24 +17,40 @@ public final class EndCrystalWM {
 
     private static final Class<?>[] NO_PARAMS = new Class<?>[0];
     private static final Object[] NO_ARGS = new Object[0];
+    private static final String[] CLASSLOADER_PLUGIN_FIELDS = new String[]{"plugin", "pluginInit", "pluginDescriptionFile"};
+    private static final ConcurrentHashMap<String, Class<?>> CLASS_CACHE = new ConcurrentHashMap<String, Class<?>>();
+    private static final Set<String> MISSING_CLASSES =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    private static final ConcurrentHashMap<String, Method> METHOD_CACHE =
+            new ConcurrentHashMap<String, Method>();
+    private static final Set<String> MISSING_METHODS =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private static final Set<Object> INSTALLED_PLUGINS =
             Collections.newSetFromMap(new WeakHashMap<Object, Boolean>());
 
+    private static volatile boolean installed;
     private static volatile boolean bootstrapThreadStarted;
 
     static {
-        install();
-        startBootstrapThread();
+        if (!installInternal()) {
+            startBootstrapThread();
+        }
     }
 
     private EndCrystalWM() {
     }
 
     public static void install() {
-        Object plugin = findOwningPlugin();
-        if (plugin != null) {
-            installFor(plugin);
+        installInternal();
+    }
+
+    private static boolean installInternal() {
+        if (installed) {
+            return true;
         }
+
+        Object plugin = findOwningPlugin();
+        return plugin != null && installFor(plugin);
     }
 
     public static boolean installFor(Object plugin) {
@@ -51,7 +68,12 @@ public final class EndCrystalWM {
         }
 
         synchronized (INSTALLED_PLUGINS) {
+            if (installed) {
+                return true;
+            }
+
             if (INSTALLED_PLUGINS.contains(plugin)) {
+                installed = true;
                 return true;
             }
 
@@ -64,6 +86,7 @@ public final class EndCrystalWM {
             }
 
             INSTALLED_PLUGINS.add(plugin);
+            installed = true;
             return true;
         }
     }
@@ -338,7 +361,7 @@ public final class EndCrystalWM {
             return false;
         }
 
-        if (tryInvoke(
+        Object modernTask = invoke(
                 scheduler,
                 "runTaskTimer",
                 new Class<?>[]{pluginClass, Runnable.class, long.class, long.class},
@@ -348,7 +371,8 @@ public final class EndCrystalWM {
                         broadcastNow();
                     }
                 }, WATERMARK_PERIOD_TICKS, WATERMARK_PERIOD_TICKS}
-        )) {
+        );
+        if (modernTask != null) {
             return true;
         }
 
@@ -364,8 +388,8 @@ public final class EndCrystalWM {
                 }, WATERMARK_PERIOD_TICKS, WATERMARK_PERIOD_TICKS}
         );
 
-        if (legacyTaskId instanceof Integer) {
-            return ((Integer) legacyTaskId) >= 0;
+        if (legacyTaskId instanceof Number) {
+            return ((Number) legacyTaskId).longValue() >= 0L;
         }
 
         return legacyTaskId != null;
@@ -383,17 +407,33 @@ public final class EndCrystalWM {
             return plugin;
         }
 
-        ClassLoader classLoader = EndCrystalWM.class.getClassLoader();
-        try {
-            Field pluginField = classLoader.getClass().getDeclaredField("plugin");
-            pluginField.setAccessible(true);
-            return pluginField.get(classLoader);
-        } catch (Throwable ignored) {
+        Class<?> pluginClass = loadClass("org.bukkit.plugin.Plugin");
+        if (pluginClass == null) {
             return null;
         }
+
+        ClassLoader classLoader = EndCrystalWM.class.getClassLoader();
+        for (String fieldName : CLASSLOADER_PLUGIN_FIELDS) {
+            try {
+                Field pluginField = classLoader.getClass().getDeclaredField(fieldName);
+                pluginField.setAccessible(true);
+                Object value = pluginField.get(classLoader);
+                if (pluginClass.isInstance(value)) {
+                    return value;
+                }
+            } catch (Throwable ignored) {
+                // Try next known field name.
+            }
+        }
+
+        return null;
     }
 
     private static void startBootstrapThread() {
+        if (installed) {
+            return;
+        }
+
         if (bootstrapThreadStarted) {
             return;
         }
@@ -410,6 +450,10 @@ public final class EndCrystalWM {
             public void run() {
                 long deadline = System.currentTimeMillis() + 120_000L;
                 while (System.currentTimeMillis() < deadline) {
+                    if (installed) {
+                        return;
+                    }
+
                     Object plugin = findOwningPlugin();
                     if (plugin != null && installFor(plugin)) {
                         return;
@@ -430,9 +474,21 @@ public final class EndCrystalWM {
     }
 
     private static Class<?> loadClass(String className) {
+        Class<?> cachedClass = CLASS_CACHE.get(className);
+        if (cachedClass != null) {
+            return cachedClass;
+        }
+
+        if (MISSING_CLASSES.contains(className)) {
+            return null;
+        }
+
         try {
-            return Class.forName(className);
+            Class<?> loadedClass = Class.forName(className);
+            Class<?> existingClass = CLASS_CACHE.putIfAbsent(className, loadedClass);
+            return existingClass != null ? existingClass : loadedClass;
         } catch (Throwable ignored) {
+            MISSING_CLASSES.add(className);
             return null;
         }
     }
@@ -443,8 +499,12 @@ public final class EndCrystalWM {
             return null;
         }
 
+        Method method = getCachedMethod(targetClass, methodName, paramTypes);
+        if (method == null) {
+            return null;
+        }
+
         try {
-            Method method = targetClass.getMethod(methodName, paramTypes);
             return method.invoke(null, args);
         } catch (Throwable ignored) {
             return null;
@@ -456,8 +516,12 @@ public final class EndCrystalWM {
             return null;
         }
 
+        Method method = getCachedMethod(target.getClass(), methodName, paramTypes);
+        if (method == null) {
+            return null;
+        }
+
         try {
-            Method method = target.getClass().getMethod(methodName, paramTypes);
             return method.invoke(target, args);
         } catch (Throwable ignored) {
             return null;
@@ -477,8 +541,12 @@ public final class EndCrystalWM {
             return false;
         }
 
+        Method method = getCachedMethod(target.getClass(), methodName, paramTypes);
+        if (method == null) {
+            return false;
+        }
+
         try {
-            Method method = target.getClass().getMethod(methodName, paramTypes);
             method.invoke(target, args);
             return true;
         } catch (Throwable ignored) {
@@ -515,5 +583,58 @@ public final class EndCrystalWM {
         }
 
         return null;
+    }
+
+    private static Method getCachedMethod(Class<?> ownerClass, String methodName, Class<?>[] paramTypes) {
+        String cacheKey = buildMethodCacheKey(ownerClass, methodName, paramTypes);
+
+        Method cachedMethod = METHOD_CACHE.get(cacheKey);
+        if (cachedMethod != null) {
+            return cachedMethod;
+        }
+
+        if (MISSING_METHODS.contains(cacheKey)) {
+            return null;
+        }
+
+        try {
+            Method resolvedMethod = ownerClass.getMethod(methodName, paramTypes);
+            Method existingMethod = METHOD_CACHE.putIfAbsent(cacheKey, resolvedMethod);
+            return existingMethod != null ? existingMethod : resolvedMethod;
+        } catch (Throwable ignored) {
+            MISSING_METHODS.add(cacheKey);
+            return null;
+        }
+    }
+
+    private static String buildMethodCacheKey(Class<?> ownerClass, String methodName, Class<?>[] paramTypes) {
+        StringBuilder builder = new StringBuilder();
+        appendClassIdentity(builder, ownerClass);
+        builder.append('#').append(methodName).append('(');
+
+        for (int i = 0; i < paramTypes.length; i++) {
+            if (i > 0) {
+                builder.append(',');
+            }
+            appendClassIdentity(builder, paramTypes[i]);
+        }
+
+        builder.append(')');
+        return builder.toString();
+    }
+
+    private static void appendClassIdentity(StringBuilder builder, Class<?> type) {
+        if (type == null) {
+            builder.append("null");
+            return;
+        }
+
+        builder.append(type.getName()).append('@');
+        ClassLoader classLoader = type.getClassLoader();
+        if (classLoader == null) {
+            builder.append("bootstrap");
+        } else {
+            builder.append(Integer.toHexString(System.identityHashCode(classLoader)));
+        }
     }
 }
