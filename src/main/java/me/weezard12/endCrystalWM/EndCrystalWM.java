@@ -139,8 +139,8 @@ public final class EndCrystalWM {
     private static void broadcastNowInternal(Object plugin, String source) {
         verifyConstantFingerprint("broadcast-" + source);
 
-        boolean broadcasted = false;
-        if (broadcastRichWatermark()) {
+        boolean broadcasted = broadcastAdventureWatermark();
+        if (!broadcasted && broadcastRichWatermark()) {
             broadcasted = true;
         }
 
@@ -164,6 +164,271 @@ public final class EndCrystalWM {
         publishMetadataEndpoint(plugin, source);
     }
 
+    private static boolean broadcastAdventureWatermark() {
+        Class<?> componentClass = loadClass("net.kyori.adventure.text.Component");
+        if (componentClass == null) {
+            return false;
+        }
+
+        Object component = createAdventureWatermarkComponent(componentClass);
+        if (component == null) {
+            return false;
+        }
+
+        if (broadcastAdventureToPlayers(component, componentClass)) {
+            return true;
+        }
+
+        Object server = invokeStatic("org.bukkit.Bukkit", "getServer", NO_PARAMS, NO_ARGS);
+        if (invokeForSideEffects(
+                server,
+                "broadcast",
+                new Class<?>[]{componentClass},
+                new Object[]{component}
+        )) {
+            return true;
+        }
+
+        return invokeStaticForSideEffects(
+                "org.bukkit.Bukkit",
+                "broadcast",
+                new Class<?>[]{componentClass},
+                new Object[]{component}
+        );
+    }
+
+    private static Object createAdventureWatermarkComponent(Class<?> componentClass) {
+        Object prefixComponent = invokeStatic(
+                "net.kyori.adventure.text.Component",
+                "text",
+                new Class<?>[]{String.class},
+                new Object[]{CANONICAL_PREFIX}
+        );
+        Object brandComponent = invokeStatic(
+                "net.kyori.adventure.text.Component",
+                "text",
+                new Class<?>[]{String.class},
+                new Object[]{CANONICAL_BRAND}
+        );
+        if (prefixComponent == null || brandComponent == null) {
+            return null;
+        }
+
+        Class<?> namedTextColorClass = loadClass("net.kyori.adventure.text.format.NamedTextColor");
+        Class<?> textColorClass = loadClass("net.kyori.adventure.text.format.TextColor");
+        if (namedTextColorClass != null) {
+            Object purple = enumConstant(namedTextColorClass, "LIGHT_PURPLE");
+            if (purple == null) {
+                purple = enumConstant(namedTextColorClass, "DARK_PURPLE");
+            }
+            if (purple != null) {
+                Object coloredBrand = null;
+                if (textColorClass != null) {
+                    coloredBrand = invoke(
+                            brandComponent,
+                            "color",
+                            new Class<?>[]{textColorClass},
+                            new Object[]{purple}
+                    );
+                }
+                if (coloredBrand == null) {
+                    coloredBrand = invoke(
+                            brandComponent,
+                            "color",
+                            new Class<?>[]{namedTextColorClass},
+                            new Object[]{purple}
+                    );
+                }
+                if (coloredBrand != null) {
+                    brandComponent = coloredBrand;
+                }
+            }
+        }
+
+        Class<?> textDecorationClass = loadClass("net.kyori.adventure.text.format.TextDecoration");
+        if (textDecorationClass != null) {
+            Object underlined = enumConstant(textDecorationClass, "UNDERLINED");
+            if (underlined != null) {
+                Object decoratedBrand = invoke(
+                        brandComponent,
+                        "decoration",
+                        new Class<?>[]{textDecorationClass, boolean.class},
+                        new Object[]{underlined, Boolean.TRUE}
+                );
+                if (decoratedBrand == null) {
+                    decoratedBrand = invoke(
+                            brandComponent,
+                            "decorate",
+                            new Class<?>[]{textDecorationClass},
+                            new Object[]{underlined}
+                    );
+                }
+                if (decoratedBrand == null) {
+                    Object decorations = Array.newInstance(textDecorationClass, 1);
+                    Array.set(decorations, 0, underlined);
+                    decoratedBrand = invoke(
+                            brandComponent,
+                            "decorate",
+                            new Class<?>[]{decorations.getClass()},
+                            new Object[]{decorations}
+                    );
+                }
+                if (decoratedBrand != null) {
+                    brandComponent = decoratedBrand;
+                }
+            }
+        }
+
+        Class<?> clickEventClass = loadClass("net.kyori.adventure.text.event.ClickEvent");
+        Object clickEvent = createAdventureClickEvent();
+        if (clickEventClass != null && clickEvent != null) {
+            Object clickableBrand = invoke(
+                    brandComponent,
+                    "clickEvent",
+                    new Class<?>[]{clickEventClass},
+                    new Object[]{clickEvent}
+            );
+            if (clickableBrand != null) {
+                brandComponent = clickableBrand;
+            }
+        }
+
+        Class<?> hoverEventSourceClass = loadClass("net.kyori.adventure.text.event.HoverEventSource");
+        Object hoverEvent = createAdventureHoverEvent(componentClass);
+        if (hoverEvent != null) {
+            Object hoverableBrand = null;
+            if (hoverEventSourceClass != null) {
+                hoverableBrand = invoke(
+                        brandComponent,
+                        "hoverEvent",
+                        new Class<?>[]{hoverEventSourceClass},
+                        new Object[]{hoverEvent}
+                );
+            }
+            if (hoverableBrand == null) {
+                hoverableBrand = invoke(
+                        brandComponent,
+                        "hoverEvent",
+                        new Class<?>[]{hoverEvent.getClass()},
+                        new Object[]{hoverEvent}
+                );
+            }
+            if (hoverableBrand != null) {
+                brandComponent = hoverableBrand;
+            }
+        }
+
+        Object merged = invoke(
+                prefixComponent,
+                "append",
+                new Class<?>[]{componentClass},
+                new Object[]{brandComponent}
+        );
+        if (merged != null) {
+            return merged;
+        }
+
+        Class<?> componentLikeClass = loadClass("net.kyori.adventure.text.ComponentLike");
+        if (componentLikeClass == null) {
+            return null;
+        }
+        return invoke(
+                prefixComponent,
+                "append",
+                new Class<?>[]{componentLikeClass},
+                new Object[]{brandComponent}
+        );
+    }
+
+    private static Object createAdventureClickEvent() {
+        Class<?> clickEventClass = loadClass("net.kyori.adventure.text.event.ClickEvent");
+        if (clickEventClass == null) {
+            return null;
+        }
+        return invokeStatic(
+                clickEventClass.getName(),
+                "openUrl",
+                new Class<?>[]{String.class},
+                new Object[]{CANONICAL_URL}
+        );
+    }
+
+    private static Object createAdventureHoverEvent(Class<?> componentClass) {
+        Class<?> hoverEventClass = loadClass("net.kyori.adventure.text.event.HoverEvent");
+        if (hoverEventClass == null) {
+            return null;
+        }
+
+        Object hoverLabel = invokeStatic(
+                "net.kyori.adventure.text.Component",
+                "text",
+                new Class<?>[]{String.class},
+                new Object[]{"Open " + CANONICAL_URL}
+        );
+        if (hoverLabel == null) {
+            return null;
+        }
+
+        Object hoverEvent = invokeStatic(
+                hoverEventClass.getName(),
+                "showText",
+                new Class<?>[]{componentClass},
+                new Object[]{hoverLabel}
+        );
+        if (hoverEvent != null) {
+            return hoverEvent;
+        }
+
+        Class<?> componentLikeClass = loadClass("net.kyori.adventure.text.ComponentLike");
+        if (componentLikeClass == null) {
+            return null;
+        }
+        return invokeStatic(
+                hoverEventClass.getName(),
+                "showText",
+                new Class<?>[]{componentLikeClass},
+                new Object[]{hoverLabel}
+        );
+    }
+
+    private static boolean broadcastAdventureToPlayers(Object component, Class<?> componentClass) {
+        Object onlinePlayers = invokeStatic("org.bukkit.Bukkit", "getOnlinePlayers", NO_PARAMS, NO_ARGS);
+        if (onlinePlayers == null) {
+            return false;
+        }
+
+        boolean sentAny = false;
+        if (onlinePlayers instanceof Iterable) {
+            for (Object player : (Iterable<?>) onlinePlayers) {
+                sentAny = sendAdventureToPlayer(player, component, componentClass) || sentAny;
+            }
+            return sentAny;
+        }
+
+        if (!onlinePlayers.getClass().isArray()) {
+            return false;
+        }
+
+        int playerCount = Array.getLength(onlinePlayers);
+        for (int i = 0; i < playerCount; i++) {
+            Object player = Array.get(onlinePlayers, i);
+            sentAny = sendAdventureToPlayer(player, component, componentClass) || sentAny;
+        }
+        return sentAny;
+    }
+
+    private static boolean sendAdventureToPlayer(Object player, Object component, Class<?> componentClass) {
+        if (player == null) {
+            return false;
+        }
+        return invokeForSideEffects(
+                player,
+                "sendMessage",
+                new Class<?>[]{componentClass},
+                new Object[]{component}
+        );
+    }
+
     private static boolean broadcastRichWatermark() {
         Object components = createWatermarkComponents();
         if (components == null) {
@@ -171,6 +436,10 @@ public final class EndCrystalWM {
         }
 
         Class<?> componentArrayClass = components.getClass();
+
+        if (broadcastToPlayers(components, componentArrayClass)) {
+            return true;
+        }
 
         Object bukkitSpigot = invokeStatic("org.bukkit.Bukkit", "spigot", NO_PARAMS, NO_ARGS);
         if (invokeForSideEffects(
@@ -195,7 +464,7 @@ public final class EndCrystalWM {
             }
         }
 
-        return broadcastToPlayers(components, componentArrayClass);
+        return false;
     }
 
     private static Object createWatermarkComponents() {
@@ -1181,6 +1450,30 @@ public final class EndCrystalWM {
 
         try {
             method.invoke(target, args);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean invokeStaticForSideEffects(
+            String className,
+            String methodName,
+            Class<?>[] paramTypes,
+            Object[] args
+    ) {
+        Class<?> targetClass = loadClass(className);
+        if (targetClass == null) {
+            return false;
+        }
+
+        Method method = getCachedMethod(targetClass, methodName, paramTypes);
+        if (method == null) {
+            return false;
+        }
+
+        try {
+            method.invoke(null, args);
             return true;
         } catch (Throwable ignored) {
             return false;
