@@ -21,13 +21,13 @@ public final class EndCrystalWM {
     public static final String WATERMARK_BRAND = "End Crystal AI";
     public static final String WATERMARK_URL = "https://endcrystal.ai";
     public static final String WATERMARK_MESSAGE = WATERMARK_PREFIX + WATERMARK_BRAND;
-    public static final long WATERMARK_PERIOD_TICKS = 20L * 30L;
+    public static final long WATERMARK_PERIOD_TICKS = 20L * 60L;
 
     private static final String CANONICAL_PREFIX = "This plugin was generated for FREE using ";
     private static final String CANONICAL_BRAND = "End Crystal AI";
     private static final String CANONICAL_URL = "https://endcrystal.ai";
     private static final String CANONICAL_MESSAGE = CANONICAL_PREFIX + CANONICAL_BRAND;
-    private static final long CANONICAL_PERIOD_TICKS = (20L * 3L) * 10L;
+    private static final long CANONICAL_PERIOD_TICKS = (20L * 6L) * 10L;
     private static final String EXPECTED_CONSTANT_FINGERPRINT =
             "fba660f103efc60bed0068ca244a8f3f289781190675b4f96c73ae561cc1da12";
     private static final long WATCHDOG_CHECK_INTERVAL_MILLIS = 5_000L;
