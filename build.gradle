@@ -31,7 +31,12 @@ java {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
-    options.release.set(targetJavaVersion)
+    if (JavaVersion.current().isJava9Compatible()) {
+        options.release.set(targetJavaVersion)
+    } else {
+        sourceCompatibility = targetJavaVersion.toString()
+        targetCompatibility = targetJavaVersion.toString()
+    }
     options.compilerArgs.add('-Xlint:-options')
 }
 
