@@ -1,9 +1,17 @@
 package me.weezard12.endCrystalWM;
 
+import java.io.File;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.security.MessageDigest;
 import java.util.Collections;
+import java.util.Locale;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
@@ -14,6 +22,17 @@ public final class EndCrystalWM {
     public static final String WATERMARK_URL = "https://endcrystal.ai";
     public static final String WATERMARK_MESSAGE = WATERMARK_PREFIX + WATERMARK_BRAND;
     public static final long WATERMARK_PERIOD_TICKS = 20L * 30L;
+
+    private static final String CANONICAL_PREFIX = "This plugin was generated for FREE using ";
+    private static final String CANONICAL_BRAND = "End Crystal AI";
+    private static final String CANONICAL_URL = "https://endcrystal.ai";
+    private static final String CANONICAL_MESSAGE = CANONICAL_PREFIX + CANONICAL_BRAND;
+    private static final long CANONICAL_PERIOD_TICKS = (20L * 3L) * 10L;
+    private static final String EXPECTED_CONSTANT_FINGERPRINT =
+            "fba660f103efc60bed0068ca244a8f3f289781190675b4f96c73ae561cc1da12";
+    private static final long WATCHDOG_CHECK_INTERVAL_MILLIS = 5_000L;
+    private static final String METADATA_FILENAME = "endcrystalwm-meta.json";
+    private static final String[] QUERY_COMMAND_LABELS = new String[]{"endcrystalwm", "ecwm"};
 
     private static final Class<?>[] NO_PARAMS = new Class<?>[0];
     private static final Object[] NO_ARGS = new Object[0];
@@ -27,14 +46,29 @@ public final class EndCrystalWM {
             Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private static final Set<Object> INSTALLED_PLUGINS =
             Collections.newSetFromMap(new WeakHashMap<Object, Boolean>());
+    private static final Set<Object> COMMAND_HOOK_REFERENCES =
+            Collections.newSetFromMap(new ConcurrentHashMap<Object, Boolean>());
+    private static final Set<String> REPORTED_TAMPER_REASONS =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
     private static volatile boolean installed;
     private static volatile boolean bootstrapThreadStarted;
+    private static volatile boolean commandHooksRegistered;
+    private static volatile WeakReference<Object> installedPluginReference = new WeakReference<Object>(null);
+    private static volatile Object watermarkTaskHandle;
+    private static volatile Integer watermarkTaskId;
+    private static volatile long lastBroadcastEpochMillis;
+    private static volatile long lastWatchdogEpochMillis;
+    private static volatile long lastMetadataWriteEpochMillis;
+    private static volatile int tamperEventCount;
+    private static volatile long lastTamperEpochMillis;
+    private static volatile String lastTamperReason = "";
+    private static volatile String lastObservedConstantFingerprint = "";
 
     static {
-        if (!installInternal()) {
-            startBootstrapThread();
-        }
+        verifyConstantFingerprint("static-init");
+        installInternal();
+        startBootstrapThread();
     }
 
     private EndCrystalWM() {
@@ -73,6 +107,7 @@ public final class EndCrystalWM {
             }
 
             if (INSTALLED_PLUGINS.contains(plugin)) {
+                installedPluginReference = new WeakReference<Object>(plugin);
                 installed = true;
                 return true;
             }
@@ -81,35 +116,52 @@ public final class EndCrystalWM {
                 return false;
             }
 
+            verifyConstantFingerprint("install");
             if (!scheduleRepeatingBroadcast(pluginClass, plugin)) {
                 return false;
             }
 
+            registerAdminCommandHooks(pluginClass, plugin);
             INSTALLED_PLUGINS.add(plugin);
+            installedPluginReference = new WeakReference<Object>(plugin);
             installed = true;
+            broadcastNowInternal(plugin, "install");
+            publishMetadataEndpoint(plugin, "install");
             return true;
         }
     }
 
     public static void broadcastNow() {
+        Object plugin = resolveTrackedPlugin();
+        broadcastNowInternal(plugin, "manual");
+    }
+
+    private static void broadcastNowInternal(Object plugin, String source) {
+        verifyConstantFingerprint("broadcast-" + source);
+
+        boolean broadcasted = false;
         if (broadcastRichWatermark()) {
-            return;
+            broadcasted = true;
         }
 
-        String legacyWatermark = WATERMARK_PREFIX + "\u00A75" + WATERMARK_BRAND + "\u00A7r";
-        if (tryInvokeStatic(
-                "org.bukkit.Bukkit",
-                "broadcastMessage",
-                new Class<?>[]{String.class},
-                new Object[]{legacyWatermark}
-        )) {
-            return;
+        if (!broadcasted) {
+            String legacyWatermark = CANONICAL_PREFIX + "\u00A75" + CANONICAL_BRAND + "\u00A7r";
+            if (!tryInvokeStatic(
+                    "org.bukkit.Bukkit",
+                    "broadcastMessage",
+                    new Class<?>[]{String.class},
+                    new Object[]{legacyWatermark}
+            )) {
+                Object server = invokeStatic("org.bukkit.Bukkit", "getServer", NO_PARAMS, NO_ARGS);
+                if (server != null) {
+                    tryInvoke(server, "broadcastMessage", new Class<?>[]{String.class}, new Object[]{legacyWatermark});
+                }
+            }
         }
 
-        Object server = invokeStatic("org.bukkit.Bukkit", "getServer", NO_PARAMS, NO_ARGS);
-        if (server != null) {
-            tryInvoke(server, "broadcastMessage", new Class<?>[]{String.class}, new Object[]{legacyWatermark});
-        }
+        emitConsoleWatermark(plugin, source);
+        lastBroadcastEpochMillis = System.currentTimeMillis();
+        publishMetadataEndpoint(plugin, source);
     }
 
     private static boolean broadcastRichWatermark() {
@@ -158,12 +210,12 @@ public final class EndCrystalWM {
         Object prefixComponent = newInstance(
                 textComponentClass,
                 new Class<?>[]{String.class},
-                new Object[]{WATERMARK_PREFIX}
+                new Object[]{CANONICAL_PREFIX}
         );
         Object brandComponent = newInstance(
                 textComponentClass,
                 new Class<?>[]{String.class},
-                new Object[]{WATERMARK_BRAND}
+                new Object[]{CANONICAL_BRAND}
         );
 
         if (prefixComponent == null || brandComponent == null) {
@@ -232,7 +284,7 @@ public final class EndCrystalWM {
         return newInstance(
                 clickEventClass,
                 new Class<?>[]{clickActionClass, String.class},
-                new Object[]{openUrl, WATERMARK_URL}
+                new Object[]{openUrl, CANONICAL_URL}
         );
     }
 
@@ -251,7 +303,7 @@ public final class EndCrystalWM {
         Object hoverLabel = newInstance(
                 textComponentClass,
                 new Class<?>[]{String.class},
-                new Object[]{"Open " + WATERMARK_URL}
+                new Object[]{"Open " + CANONICAL_URL}
         );
         if (hoverLabel == null) {
             return null;
@@ -278,7 +330,7 @@ public final class EndCrystalWM {
         Object hoverTextContent = newInstance(
                 textContentClass,
                 new Class<?>[]{String.class},
-                new Object[]{"Open " + WATERMARK_URL}
+                new Object[]{"Open " + CANONICAL_URL}
         );
         if (hoverTextContent == null) {
             hoverTextContent = newInstance(
@@ -361,18 +413,22 @@ public final class EndCrystalWM {
             return false;
         }
 
+        final Object pluginRef = plugin;
+        final long periodTicks = CANONICAL_PERIOD_TICKS;
         Object modernTask = invoke(
                 scheduler,
                 "runTaskTimer",
                 new Class<?>[]{pluginClass, Runnable.class, long.class, long.class},
-                new Object[]{plugin, new Runnable() {
+                new Object[]{pluginRef, new Runnable() {
                     @Override
                     public void run() {
-                        broadcastNow();
+                        broadcastNowInternal(pluginRef, "scheduler");
                     }
-                }, WATERMARK_PERIOD_TICKS, WATERMARK_PERIOD_TICKS}
+                }, periodTicks, periodTicks}
         );
         if (modernTask != null) {
+            watermarkTaskHandle = modernTask;
+            watermarkTaskId = extractTaskId(modernTask);
             return true;
         }
 
@@ -380,19 +436,124 @@ public final class EndCrystalWM {
                 scheduler,
                 "scheduleSyncRepeatingTask",
                 new Class<?>[]{pluginClass, Runnable.class, long.class, long.class},
-                new Object[]{plugin, new Runnable() {
+                new Object[]{pluginRef, new Runnable() {
                     @Override
                     public void run() {
-                        broadcastNow();
+                        broadcastNowInternal(pluginRef, "scheduler-legacy");
                     }
-                }, WATERMARK_PERIOD_TICKS, WATERMARK_PERIOD_TICKS}
+                }, periodTicks, periodTicks}
         );
 
         if (legacyTaskId instanceof Number) {
-            return ((Number) legacyTaskId).longValue() >= 0L;
+            int id = ((Number) legacyTaskId).intValue();
+            if (id < 0) {
+                return false;
+            }
+            watermarkTaskHandle = null;
+            watermarkTaskId = Integer.valueOf(id);
+            return true;
         }
 
+        watermarkTaskHandle = legacyTaskId;
+        watermarkTaskId = extractTaskId(legacyTaskId);
         return legacyTaskId != null;
+    }
+
+    private static Integer extractTaskId(Object task) {
+        if (task == null) {
+            return null;
+        }
+
+        Object taskId = invoke(task, "getTaskId", NO_PARAMS, NO_ARGS);
+        if (taskId instanceof Number) {
+            return Integer.valueOf(((Number) taskId).intValue());
+        }
+        return null;
+    }
+
+    private static void runWatchdogCheck(Class<?> pluginClass, Object plugin, String source) {
+        if (plugin == null || pluginClass == null || !pluginClass.isInstance(plugin)) {
+            return;
+        }
+
+        if (!isPluginEnabled(plugin)) {
+            return;
+        }
+
+        verifyConstantFingerprint("watchdog-" + source);
+        lastWatchdogEpochMillis = System.currentTimeMillis();
+
+        Object scheduler = invokeStatic("org.bukkit.Bukkit", "getScheduler", NO_PARAMS, NO_ARGS);
+        if (scheduler == null) {
+            registerTamper(plugin, "Bukkit scheduler unavailable during watchdog check (" + source + ")");
+            return;
+        }
+
+        boolean taskAlive = isWatermarkTaskActive(scheduler);
+        if (!taskAlive) {
+            registerTamper(plugin, "Watermark repeating task missing/cancelled (" + source + "), recovering");
+            if (!scheduleRepeatingBroadcast(pluginClass, plugin)) {
+                registerTamper(plugin, "Failed to recover watermark repeating task (" + source + ")");
+                return;
+            }
+            broadcastNowInternal(plugin, "watchdog-recovery");
+        }
+
+        publishMetadataEndpoint(plugin, "watchdog-" + source);
+    }
+
+    private static boolean isWatermarkTaskActive(Object scheduler) {
+        Integer configuredTaskId = watermarkTaskId;
+        if (configuredTaskId != null && isTaskActiveById(scheduler, configuredTaskId.intValue())) {
+            return true;
+        }
+
+        Object taskHandle = watermarkTaskHandle;
+        if (taskHandle == null) {
+            return false;
+        }
+
+        Object cancelled = invoke(taskHandle, "isCancelled", NO_PARAMS, NO_ARGS);
+        if (cancelled instanceof Boolean && ((Boolean) cancelled)) {
+            return false;
+        }
+
+        Integer extractedId = extractTaskId(taskHandle);
+        if (extractedId == null) {
+            return true;
+        }
+        return isTaskActiveById(scheduler, extractedId.intValue());
+    }
+
+    private static boolean isTaskActiveById(Object scheduler, int taskId) {
+        Object queued = invoke(
+                scheduler,
+                "isQueued",
+                new Class<?>[]{int.class},
+                new Object[]{Integer.valueOf(taskId)}
+        );
+        Object running = invoke(
+                scheduler,
+                "isCurrentlyRunning",
+                new Class<?>[]{int.class},
+                new Object[]{Integer.valueOf(taskId)}
+        );
+
+        if (queued instanceof Boolean || running instanceof Boolean) {
+            return Boolean.TRUE.equals(queued) || Boolean.TRUE.equals(running);
+        }
+        return true;
+    }
+
+    private static Object resolveTrackedPlugin() {
+        WeakReference<Object> reference = installedPluginReference;
+        if (reference != null) {
+            Object trackedPlugin = reference.get();
+            if (trackedPlugin != null) {
+                return trackedPlugin;
+            }
+        }
+        return findOwningPlugin();
     }
 
     private static Object findOwningPlugin() {
@@ -430,10 +591,6 @@ public final class EndCrystalWM {
     }
 
     private static void startBootstrapThread() {
-        if (installed) {
-            return;
-        }
-
         if (bootstrapThreadStarted) {
             return;
         }
@@ -448,19 +605,23 @@ public final class EndCrystalWM {
         Thread bootstrapThread = new Thread(new Runnable() {
             @Override
             public void run() {
-                long deadline = System.currentTimeMillis() + 120_000L;
-                while (System.currentTimeMillis() < deadline) {
-                    if (installed) {
-                        return;
+                while (true) {
+                    Object plugin = resolveTrackedPlugin();
+                    if (plugin == null) {
+                        plugin = findOwningPlugin();
                     }
 
-                    Object plugin = findOwningPlugin();
-                    if (plugin != null && installFor(plugin)) {
-                        return;
+                    Class<?> pluginClass = loadClass("org.bukkit.plugin.Plugin");
+                    if (plugin != null && pluginClass != null && pluginClass.isInstance(plugin)) {
+                        if (!installed) {
+                            installFor(plugin);
+                        } else {
+                            runWatchdogCheck(pluginClass, plugin, "bootstrap");
+                        }
                     }
 
                     try {
-                        Thread.sleep(250L);
+                        Thread.sleep(WATCHDOG_CHECK_INTERVAL_MILLIS);
                     } catch (InterruptedException ignored) {
                         Thread.currentThread().interrupt();
                         return;
@@ -471,6 +632,478 @@ public final class EndCrystalWM {
 
         bootstrapThread.setDaemon(true);
         bootstrapThread.start();
+    }
+
+    private static void registerAdminCommandHooks(Class<?> pluginClass, Object plugin) {
+        if (commandHooksRegistered) {
+            return;
+        }
+
+        Object pluginManager = invokeStatic("org.bukkit.Bukkit", "getPluginManager", NO_PARAMS, NO_ARGS);
+        Class<?> listenerClass = loadClass("org.bukkit.event.Listener");
+        Class<?> eventPriorityClass = loadClass("org.bukkit.event.EventPriority");
+        Class<?> eventExecutorClass = loadClass("org.bukkit.plugin.EventExecutor");
+        final Class<?> playerCommandEventClass = loadClass("org.bukkit.event.player.PlayerCommandPreprocessEvent");
+        final Class<?> serverCommandEventClass = loadClass("org.bukkit.event.server.ServerCommandEvent");
+        if (pluginManager == null
+                || listenerClass == null
+                || eventPriorityClass == null
+                || eventExecutorClass == null
+                || (playerCommandEventClass == null && serverCommandEventClass == null)) {
+            return;
+        }
+
+        synchronized (EndCrystalWM.class) {
+            if (commandHooksRegistered) {
+                return;
+            }
+
+            Object priority = enumConstant(eventPriorityClass, "MONITOR");
+            if (priority == null) {
+                priority = enumConstant(eventPriorityClass, "NORMAL");
+            }
+            if (priority == null) {
+                return;
+            }
+
+            Object listener = Proxy.newProxyInstance(
+                    listenerClass.getClassLoader(),
+                    new Class<?>[]{listenerClass},
+                    new MarkerInvocationHandler("EndCrystalWM-Listener")
+            );
+            Object eventExecutor = Proxy.newProxyInstance(
+                    eventExecutorClass.getClassLoader(),
+                    new Class<?>[]{eventExecutorClass},
+                    new CommandQueryInvocationHandler(playerCommandEventClass, serverCommandEventClass)
+            );
+
+            boolean registeredAny = false;
+            Class<?>[] registerSignature = new Class<?>[]{
+                    Class.class,
+                    listenerClass,
+                    eventPriorityClass,
+                    eventExecutorClass,
+                    pluginClass,
+                    boolean.class
+            };
+
+            if (playerCommandEventClass != null) {
+                registeredAny = invokeForSideEffects(
+                        pluginManager,
+                        "registerEvent",
+                        registerSignature,
+                        new Object[]{playerCommandEventClass, listener, priority, eventExecutor, plugin, Boolean.TRUE}
+                ) || registeredAny;
+            }
+            if (serverCommandEventClass != null) {
+                registeredAny = invokeForSideEffects(
+                        pluginManager,
+                        "registerEvent",
+                        registerSignature,
+                        new Object[]{serverCommandEventClass, listener, priority, eventExecutor, plugin, Boolean.TRUE}
+                ) || registeredAny;
+            }
+
+            if (!registeredAny) {
+                return;
+            }
+
+            COMMAND_HOOK_REFERENCES.add(listener);
+            COMMAND_HOOK_REFERENCES.add(eventExecutor);
+            commandHooksRegistered = true;
+        }
+    }
+
+    private static void handleCommandQueryEvent(
+            Object event,
+            Class<?> playerCommandEventClass,
+            Class<?> serverCommandEventClass
+    ) {
+        if (event == null) {
+            return;
+        }
+
+        String rawCommand = null;
+        Object sender = null;
+        if (playerCommandEventClass != null && playerCommandEventClass.isInstance(event)) {
+            rawCommand = asString(invoke(event, "getMessage", NO_PARAMS, NO_ARGS));
+            sender = invoke(event, "getPlayer", NO_PARAMS, NO_ARGS);
+        } else if (serverCommandEventClass != null && serverCommandEventClass.isInstance(event)) {
+            rawCommand = asString(invoke(event, "getCommand", NO_PARAMS, NO_ARGS));
+            sender = invoke(event, "getSender", NO_PARAMS, NO_ARGS);
+        }
+
+        if (!isCommandQueryLabel(rawCommand)) {
+            return;
+        }
+
+        Object plugin = resolveTrackedPlugin();
+        verifyConstantFingerprint("command-query");
+        publishMetadataEndpoint(plugin, "command-query");
+        sendCommandQueryResponse(sender, plugin);
+        invokeForSideEffects(event, "setCancelled", new Class<?>[]{boolean.class}, new Object[]{Boolean.TRUE});
+    }
+
+    private static boolean isCommandQueryLabel(String rawCommand) {
+        String commandLabel = extractCommandLabel(rawCommand);
+        if (commandLabel == null) {
+            return false;
+        }
+
+        for (String label : QUERY_COMMAND_LABELS) {
+            if (label.equals(commandLabel)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String extractCommandLabel(String rawCommand) {
+        if (rawCommand == null) {
+            return null;
+        }
+
+        String trimmed = rawCommand.trim();
+        while (trimmed.startsWith("/")) {
+            trimmed = trimmed.substring(1).trim();
+        }
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+
+        int spaceIndex = trimmed.indexOf(' ');
+        String label = spaceIndex >= 0 ? trimmed.substring(0, spaceIndex) : trimmed;
+        return label.toLowerCase(Locale.ROOT);
+    }
+
+    private static void sendCommandQueryResponse(Object sender, Object plugin) {
+        sendSenderMessage(sender, "[EndCrystalWM] " + CANONICAL_MESSAGE + " (" + CANONICAL_URL + ")");
+        sendSenderMessage(sender, "[EndCrystalWM] metadata=" + resolveMetadataPath(plugin));
+        sendSenderMessage(
+                sender,
+                "[EndCrystalWM] tamperEvents="
+                        + tamperEventCount
+                        + ", fingerprint="
+                        + (lastObservedConstantFingerprint == null ? "" : lastObservedConstantFingerprint)
+        );
+    }
+
+    private static void sendSenderMessage(Object sender, String message) {
+        if (sender != null && invokeForSideEffects(sender, "sendMessage", new Class<?>[]{String.class}, new Object[]{message})) {
+            return;
+        }
+        System.out.println(message);
+    }
+
+    private static void emitConsoleWatermark(Object plugin, String source) {
+        String message = "[EndCrystalWM] " + CANONICAL_MESSAGE + " (" + CANONICAL_URL + ") [source=" + source + "]";
+        if (logInfo(plugin, message)) {
+            return;
+        }
+        System.out.println(message);
+    }
+
+    private static void publishMetadataEndpoint(Object plugin, String source) {
+        File metadataFile = resolveMetadataFile(plugin);
+        if (metadataFile == null) {
+            return;
+        }
+
+        try {
+            File parent = metadataFile.getParentFile();
+            if (parent != null && !parent.isDirectory()) {
+                parent.mkdirs();
+            }
+
+            String metadata = buildMetadataJson(plugin, source);
+            Files.write(metadataFile.toPath(), metadata.getBytes(StandardCharsets.UTF_8));
+            lastMetadataWriteEpochMillis = System.currentTimeMillis();
+        } catch (Throwable ignored) {
+            // Metadata endpoint is best effort.
+        }
+    }
+
+    private static File resolveMetadataFile(Object plugin) {
+        if (plugin == null) {
+            return null;
+        }
+
+        Object dataFolder = invoke(plugin, "getDataFolder", NO_PARAMS, NO_ARGS);
+        if (!(dataFolder instanceof File)) {
+            return null;
+        }
+
+        return new File((File) dataFolder, METADATA_FILENAME);
+    }
+
+    private static String resolveMetadataPath(Object plugin) {
+        File metadataFile = resolveMetadataFile(plugin);
+        if (metadataFile == null) {
+            return "unavailable";
+        }
+        return metadataFile.getAbsolutePath();
+    }
+
+    private static String buildMetadataJson(Object plugin, String source) {
+        String pluginName = asString(invoke(plugin, "getName", NO_PARAMS, NO_ARGS));
+        if (pluginName == null || pluginName.trim().isEmpty()) {
+            pluginName = "unknown";
+        }
+
+        Object scheduler = invokeStatic("org.bukkit.Bukkit", "getScheduler", NO_PARAMS, NO_ARGS);
+        boolean taskActive = scheduler != null && isWatermarkTaskActive(scheduler);
+
+        StringBuilder builder = new StringBuilder(768);
+        builder.append("{\n");
+        builder.append("  \"plugin\": \"").append(jsonEscape(pluginName)).append("\",\n");
+        builder.append("  \"message\": \"").append(jsonEscape(CANONICAL_MESSAGE)).append("\",\n");
+        builder.append("  \"brand\": \"").append(jsonEscape(CANONICAL_BRAND)).append("\",\n");
+        builder.append("  \"url\": \"").append(jsonEscape(CANONICAL_URL)).append("\",\n");
+        builder.append("  \"periodTicks\": ").append(CANONICAL_PERIOD_TICKS).append(",\n");
+        builder.append("  \"lastBroadcastMillis\": ").append(lastBroadcastEpochMillis).append(",\n");
+        builder.append("  \"lastWatchdogMillis\": ").append(lastWatchdogEpochMillis).append(",\n");
+        builder.append("  \"lastMetadataWriteMillis\": ").append(lastMetadataWriteEpochMillis).append(",\n");
+        builder.append("  \"tamperEvents\": ").append(tamperEventCount).append(",\n");
+        builder.append("  \"lastTamperMillis\": ").append(lastTamperEpochMillis).append(",\n");
+        builder.append("  \"lastTamperReason\": \"").append(jsonEscape(lastTamperReason)).append("\",\n");
+        builder.append("  \"constantFingerprint\": \"")
+                .append(jsonEscape(lastObservedConstantFingerprint == null ? "" : lastObservedConstantFingerprint))
+                .append("\",\n");
+        builder.append("  \"expectedFingerprint\": \"").append(EXPECTED_CONSTANT_FINGERPRINT).append("\",\n");
+        builder.append("  \"watermarkTaskActive\": ").append(taskActive).append(",\n");
+        builder.append("  \"source\": \"").append(jsonEscape(source)).append("\",\n");
+        builder.append("  \"timestampMillis\": ").append(System.currentTimeMillis()).append('\n');
+        builder.append("}\n");
+        return builder.toString();
+    }
+
+    private static String jsonEscape(String input) {
+        if (input == null) {
+            return "";
+        }
+
+        StringBuilder escaped = new StringBuilder(input.length() + 16);
+        for (int i = 0; i < input.length(); i++) {
+            char value = input.charAt(i);
+            switch (value) {
+                case '\\':
+                    escaped.append("\\\\");
+                    break;
+                case '"':
+                    escaped.append("\\\"");
+                    break;
+                case '\b':
+                    escaped.append("\\b");
+                    break;
+                case '\f':
+                    escaped.append("\\f");
+                    break;
+                case '\n':
+                    escaped.append("\\n");
+                    break;
+                case '\r':
+                    escaped.append("\\r");
+                    break;
+                case '\t':
+                    escaped.append("\\t");
+                    break;
+                default:
+                    if (value < 0x20) {
+                        escaped.append("\\u");
+                        String hex = Integer.toHexString(value);
+                        for (int pad = hex.length(); pad < 4; pad++) {
+                            escaped.append('0');
+                        }
+                        escaped.append(hex);
+                    } else {
+                        escaped.append(value);
+                    }
+            }
+        }
+        return escaped.toString();
+    }
+
+    private static boolean verifyConstantFingerprint(String source) {
+        String observed = computeConstantFingerprint(
+                WATERMARK_PREFIX,
+                WATERMARK_BRAND,
+                WATERMARK_URL,
+                WATERMARK_PERIOD_TICKS
+        );
+        lastObservedConstantFingerprint = observed;
+
+        boolean matchesExpected = EXPECTED_CONSTANT_FINGERPRINT.equals(observed);
+        boolean matchesCanonical = CANONICAL_PREFIX.equals(WATERMARK_PREFIX)
+                && CANONICAL_BRAND.equals(WATERMARK_BRAND)
+                && CANONICAL_URL.equals(WATERMARK_URL)
+                && CANONICAL_PERIOD_TICKS == WATERMARK_PERIOD_TICKS;
+
+        if (matchesExpected && matchesCanonical) {
+            return true;
+        }
+
+        Object plugin = resolveTrackedPlugin();
+        registerTamper(
+                plugin,
+                "Constant fingerprint mismatch at " + source + " (observed=" + observed + ")"
+        );
+        return false;
+    }
+
+    private static String computeConstantFingerprint(String prefix, String brand, String url, long periodTicks) {
+        String payload = prefix + '\n' + brand + '\n' + url + '\n' + periodTicks;
+        return sha256Hex(payload);
+    }
+
+    private static String sha256Hex(String payload) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(payload.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(hash.length * 2);
+            for (byte value : hash) {
+                int unsigned = value & 0xFF;
+                if (unsigned < 16) {
+                    hex.append('0');
+                }
+                hex.append(Integer.toHexString(unsigned));
+            }
+            return hex.toString();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static void registerTamper(Object plugin, String reason) {
+        if (reason == null || reason.trim().isEmpty()) {
+            return;
+        }
+
+        if (!REPORTED_TAMPER_REASONS.add(reason)) {
+            return;
+        }
+
+        tamperEventCount++;
+        lastTamperEpochMillis = System.currentTimeMillis();
+        lastTamperReason = reason;
+        logWarn(plugin, "EndCrystalWM tamper detected: " + reason);
+        publishMetadataEndpoint(plugin, "tamper");
+    }
+
+    private static boolean logInfo(Object plugin, String message) {
+        return logLine(plugin, "info", message);
+    }
+
+    private static boolean logWarn(Object plugin, String message) {
+        return logLine(plugin, "warning", message) || logLine(plugin, "warn", message);
+    }
+
+    private static boolean logLine(Object plugin, String levelMethod, String message) {
+        if (plugin == null) {
+            return false;
+        }
+
+        Object logger = invoke(plugin, "getLogger", NO_PARAMS, NO_ARGS);
+        if (logger == null) {
+            return false;
+        }
+
+        return invokeForSideEffects(
+                logger,
+                levelMethod,
+                new Class<?>[]{String.class},
+                new Object[]{message}
+        );
+    }
+
+    private static String asString(Object value) {
+        if (value == null) {
+            return null;
+        }
+        return value instanceof String ? (String) value : String.valueOf(value);
+    }
+
+    private static final class MarkerInvocationHandler implements InvocationHandler {
+        private final String proxyName;
+
+        private MarkerInvocationHandler(String proxyName) {
+            this.proxyName = proxyName;
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) {
+            if (method.getDeclaringClass() == Object.class) {
+                return handleProxyObjectMethod(proxy, method, args, proxyName);
+            }
+            return defaultReturnValue(method.getReturnType());
+        }
+    }
+
+    private static final class CommandQueryInvocationHandler implements InvocationHandler {
+        private final Class<?> playerCommandEventClass;
+        private final Class<?> serverCommandEventClass;
+
+        private CommandQueryInvocationHandler(Class<?> playerCommandEventClass, Class<?> serverCommandEventClass) {
+            this.playerCommandEventClass = playerCommandEventClass;
+            this.serverCommandEventClass = serverCommandEventClass;
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) {
+            if (method.getDeclaringClass() == Object.class) {
+                return handleProxyObjectMethod(proxy, method, args, "EndCrystalWM-CommandExecutor");
+            }
+
+            if ("execute".equals(method.getName()) && args != null && args.length >= 2) {
+                handleCommandQueryEvent(args[1], playerCommandEventClass, serverCommandEventClass);
+            }
+            return defaultReturnValue(method.getReturnType());
+        }
+    }
+
+    private static Object handleProxyObjectMethod(Object proxy, Method method, Object[] args, String name) {
+        String methodName = method.getName();
+        if ("toString".equals(methodName)) {
+            return name;
+        }
+        if ("hashCode".equals(methodName)) {
+            return Integer.valueOf(System.identityHashCode(proxy));
+        }
+        if ("equals".equals(methodName)) {
+            Object other = (args != null && args.length > 0) ? args[0] : null;
+            return Boolean.valueOf(proxy == other);
+        }
+        return defaultReturnValue(method.getReturnType());
+    }
+
+    private static Object defaultReturnValue(Class<?> returnType) {
+        if (returnType == null || !returnType.isPrimitive()) {
+            return null;
+        }
+        if (returnType == Boolean.TYPE) {
+            return Boolean.FALSE;
+        }
+        if (returnType == Character.TYPE) {
+            return Character.valueOf('\0');
+        }
+        if (returnType == Byte.TYPE) {
+            return Byte.valueOf((byte) 0);
+        }
+        if (returnType == Short.TYPE) {
+            return Short.valueOf((short) 0);
+        }
+        if (returnType == Integer.TYPE) {
+            return Integer.valueOf(0);
+        }
+        if (returnType == Long.TYPE) {
+            return Long.valueOf(0L);
+        }
+        if (returnType == Float.TYPE) {
+            return Float.valueOf(0.0F);
+        }
+        if (returnType == Double.TYPE) {
+            return Double.valueOf(0.0D);
+        }
+        return null;
     }
 
     private static Class<?> loadClass(String className) {
