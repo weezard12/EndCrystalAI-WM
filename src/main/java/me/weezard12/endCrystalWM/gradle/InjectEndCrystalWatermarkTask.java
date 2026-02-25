@@ -48,8 +48,11 @@ import java.util.regex.Pattern;
 @DisableCachingByDefault(because = "Mutates an archive file in place.")
 public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
     private static final Pattern MAIN_PATTERN = Pattern.compile("^main\\s*:\\s*(.+)$");
+    private static final int CLASS_READER_FLAGS = ClassReader.EXPAND_FRAMES;
+    private static final int CLASS_WRITER_FLAGS = ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS;
 
     @InputFile
+    @Optional
     @PathSensitive(PathSensitivity.NONE)
     public abstract RegularFileProperty getTargetJar();
 
@@ -68,9 +71,10 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
 
     @TaskAction
     public void inject() {
-        File targetJarFile = getTargetJar().get().getAsFile();
-        if (!targetJarFile.isFile()) {
-            throw new GradleException("EndCrystalWM injector: target jar does not exist: " + targetJarFile);
+        File targetJarFile = getTargetJar().getAsFile().getOrNull();
+        if (targetJarFile == null || !targetJarFile.isFile()) {
+            getLogger().lifecycle("EndCrystalWM injector: target jar is unavailable, skipping");
+            return;
         }
 
         String configuredInjectorOwner = normalizeOwner(getInjectorOwnerInternalName().get());
@@ -208,7 +212,8 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
 
     private byte[] patchMainClass(byte[] classBytes, String injectorOwner, String mainClassName) {
         ClassNode classNode = new ClassNode();
-        new ClassReader(classBytes).accept(classNode, 0);
+        ClassReader classReader = new ClassReader(classBytes);
+        classReader.accept(classNode, CLASS_READER_FLAGS);
 
         MethodNode onEnable = findOnEnableMethod(classNode);
         if (onEnable != null && containsInstallCall(onEnable, injectorOwner)) {
@@ -225,7 +230,7 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
             injectIntoExistingOnEnable(onEnable, injectorOwner);
         }
 
-        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        ClassWriter writer = new SafeClassWriter(classReader, CLASS_WRITER_FLAGS, getClass().getClassLoader());
         classNode.accept(writer);
         return writer.toByteArray();
     }
@@ -528,6 +533,51 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
             this.tryStart = tryStart;
             this.tryEnd = tryEnd;
             this.catchHandler = catchHandler;
+        }
+    }
+
+    private static final class SafeClassWriter extends ClassWriter {
+        private final ClassLoader classLoader;
+
+        private SafeClassWriter(ClassReader classReader, int writerFlags, ClassLoader classLoader) {
+            super(classReader, writerFlags);
+            this.classLoader = classLoader;
+        }
+
+        @Override
+        protected String getCommonSuperClass(String type1, String type2) {
+            try {
+                Class<?> first = loadClass(type1);
+                Class<?> second = loadClass(type2);
+                if (first.isAssignableFrom(second)) {
+                    return type1;
+                }
+                if (second.isAssignableFrom(first)) {
+                    return type2;
+                }
+                if (first.isInterface() || second.isInterface()) {
+                    return "java/lang/Object";
+                }
+                do {
+                    first = first.getSuperclass();
+                } while (first != null && !first.isAssignableFrom(second));
+                return first == null ? "java/lang/Object" : first.getName().replace('.', '/');
+            } catch (Throwable ignored) {
+                return "java/lang/Object";
+            }
+        }
+
+        private Class<?> loadClass(String internalName) throws ClassNotFoundException {
+            String className = internalName.replace('/', '.');
+            try {
+                return Class.forName(className, false, classLoader);
+            } catch (ClassNotFoundException primary) {
+                ClassLoader contextLoader = Thread.currentThread().getContextClassLoader();
+                if (contextLoader != null && contextLoader != classLoader) {
+                    return Class.forName(className, false, contextLoader);
+                }
+                throw primary;
+            }
         }
     }
 }

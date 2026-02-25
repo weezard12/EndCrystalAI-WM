@@ -9,74 +9,112 @@ It broadcasts this message globally in chat every 30 seconds:
 - `End Crystal AI` is sent as a purple clickable text segment.
 - Hover text prompts opening `https://endcrystal.ai`.
 
-## JitPack
+## Compatibility
 
-```groovy
+- Targets Paper/Spigot plugin builds across Java 8 to Java 21.
+- Injector patches both `jar` and `shadowJar` outputs.
+- Works with `com.github.johnrengelman.shadow`, `io.github.goooler.shadow`, and `com.gradleup.shadow`.
+
+## JitPack Dependency
+
+Use stable Git tags (for example `1.0.1`) instead of moving labels.
+
+```kotlin
 repositories {
-    maven { url = uri("https://jitpack.io") }
+    maven("https://jitpack.io")
 }
 
 dependencies {
-    implementation("com.github.weezard12:EndCrystalWM:<tag>")
+    implementation("com.github.weezard12:EndCrystalWM:<version>")
 }
 ```
 
-## No Java-Code Setup (Auto Inject onEnable)
+## No Java/Yml Changes (Buildscript Apply)
 
-Use this when you want zero Java changes in your host plugin.
+Use this when you want the watermark enabled from Gradle only.
 
-```groovy
+```kotlin
 buildscript {
     repositories {
-        maven { url = uri("https://jitpack.io") }
+        maven("https://jitpack.io")
     }
     dependencies {
-        classpath("com.github.weezard12:EndCrystalWM:<tag>")
+        classpath("com.github.weezard12:EndCrystalWM:<version>")
     }
 }
 
 plugins {
-    id("java")
-    id("com.github.johnrengelman.shadow") version "8.1.1"
+    java
+    id("com.gradleup.shadow") version "9.3.0"
 }
 
-apply plugin: "me.weezard12.endcrystalwm-injector"
+apply(plugin = "me.weezard12.endcrystalwm-injector")
 
 repositories {
     mavenCentral()
-    maven { url = uri("https://jitpack.io") }
+    maven("https://repo.papermc.io/repository/maven-public/")
+    maven("https://jitpack.io")
 }
 
 dependencies {
-    implementation("com.github.weezard12:EndCrystalWM:<tag>")
+    compileOnly("io.papermc.paper:paper-api:1.21.1-R0.1-SNAPSHOT")
+    // runtime watermark dependency is auto-added by the injector plugin by default
 }
 ```
 
-The injector automatically patches your output jar (`jar` and `shadowJar`) by inserting:
+## Plugins DSL Setup (settings.gradle.kts + build.gradle.kts)
+
+If you prefer `plugins {}` for the injector id, add plugin resolution:
+
+```kotlin
+// settings.gradle.kts
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        maven("https://jitpack.io")
+    }
+    resolutionStrategy {
+        eachPlugin {
+            if (requested.id.id == "me.weezard12.endcrystalwm-injector") {
+                useModule("com.github.weezard12:EndCrystalWM:${requested.version}")
+            }
+        }
+    }
+}
+```
+
+```kotlin
+// build.gradle.kts
+plugins {
+    java
+    id("me.weezard12.endcrystalwm-injector") version "<version>"
+    id("com.gradleup.shadow") version "9.3.0"
+}
+```
+
+The injector patches your plugin main `onEnable()` and inserts:
 
 `EndCrystalWM.installFor(this);`
 
-into your plugin main class `onEnable()`.
-
 ## Injector Options
 
-```groovy
+```kotlin
 endCrystalWmInjector {
     enabled = true
-    // Optional: override plugin main class instead of reading plugin.yml
-    // mainClassOverride = "com.example.MyPlugin"
+    mainClassOverride.set("com.example.MyPlugin") // optional
+    injectorOwnerInternalName.set("my/relocated/path/EndCrystalWM") // optional
+    failOnMissingPluginYml.set(true)
+    failOnMissingMainClass.set(true)
 
-    // Optional: override owner in case of custom relocation
-    // injectorOwnerInternalName = "my/relocated/path/EndCrystalWM"
-
-    // Defaults are true:
-    // failOnMissingPluginYml = true
-    // failOnMissingMainClass = true
+    // auto dependency wiring defaults:
+    autoAddRuntimeDependency.set(true)
+    runtimeConfiguration.set("implementation")
+    runtimeDependencyNotation.set("com.github.weezard12:EndCrystalWM:<version>")
 }
 ```
 
 ## Runtime Behavior
 
-- When injection is enabled, no host Java code changes are required.
+- When injection is enabled, no host Java/Yml code changes are required.
 - The injected call is wrapped in `try/catch Throwable` so host plugin startup is not hard-crashed by missing classes.
 - Duplicate injection is skipped automatically.

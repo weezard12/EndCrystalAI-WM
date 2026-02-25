@@ -12,8 +12,10 @@ repositories {
 
 dependencies {
     compileOnly gradleApi()
-    implementation("org.ow2.asm:asm:9.8")
-    implementation("org.ow2.asm:asm-tree:9.8")
+    implementation("org.ow2.asm:asm:9.9")
+    implementation("org.ow2.asm:asm-tree:9.9")
+    testImplementation gradleTestKit()
+    testImplementation("junit:junit:4.13.2")
 }
 
 def targetJavaVersion = 8
@@ -38,6 +40,15 @@ tasks.withType(JavaCompile).configureEach {
         targetCompatibility = targetJavaVersion.toString()
     }
     options.compilerArgs.add('-Xlint:-options')
+}
+
+tasks.withType(Jar).configureEach {
+    manifest {
+        attributes(
+                'Implementation-Title': 'EndCrystalWM',
+                'Implementation-Version': project.version
+        )
+    }
 }
 
 tasks.withType(Javadoc).configureEach {

@@ -12,4 +12,10 @@ public abstract class EndCrystalWmInjectorExtension {
     public abstract Property<Boolean> getFailOnMissingPluginYml();
 
     public abstract Property<Boolean> getFailOnMissingMainClass();
+
+    public abstract Property<Boolean> getAutoAddRuntimeDependency();
+
+    public abstract Property<String> getRuntimeDependencyNotation();
+
+    public abstract Property<String> getRuntimeConfiguration();
 }
