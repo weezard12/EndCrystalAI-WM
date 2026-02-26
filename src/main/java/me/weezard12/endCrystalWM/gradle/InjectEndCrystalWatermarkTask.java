@@ -19,6 +19,7 @@ import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -38,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -61,6 +63,10 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
 
     @Input
     @Optional
+    public abstract Property<String> getWatermarkLanguage();
+
+    @Input
+    @Optional
     public abstract Property<String> getMainClassOverride();
 
     @Input
@@ -78,6 +84,7 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
         }
 
         String configuredInjectorOwner = normalizeOwner(getInjectorOwnerInternalName().get());
+        String configuredWatermarkLanguage = normalizeLanguageTag(getWatermarkLanguage().getOrNull());
 
         JarSnapshot snapshot;
         try {
@@ -103,7 +110,12 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
             return;
         }
 
-        byte[] patchedClassBytes = patchMainClass(mainClassEntry.bytes, injectorOwner, mainClass);
+        byte[] patchedClassBytes = patchMainClass(
+                mainClassEntry.bytes,
+                injectorOwner,
+                mainClass,
+                configuredWatermarkLanguage
+        );
         if (patchedClassBytes == null) {
             getLogger().lifecycle("EndCrystalWM injector: {} already contains an install call, skipping", mainClass);
             return;
@@ -210,7 +222,12 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
         return configuredOwner;
     }
 
-    private byte[] patchMainClass(byte[] classBytes, String injectorOwner, String mainClassName) {
+    private byte[] patchMainClass(
+            byte[] classBytes,
+            String injectorOwner,
+            String mainClassName,
+            String watermarkLanguage
+    ) {
         ClassNode classNode = new ClassNode();
         ClassReader classReader = new ClassReader(classBytes);
         classReader.accept(classNode, CLASS_READER_FLAGS);
@@ -221,13 +238,13 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
         }
 
         if (onEnable == null) {
-            onEnable = createOnEnableMethod(classNode, injectorOwner);
+            onEnable = createOnEnableMethod(classNode, injectorOwner, watermarkLanguage);
             classNode.methods.add(onEnable);
         } else {
             if ((onEnable.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
                 throw new GradleException("EndCrystalWM injector: " + mainClassName + "#onEnable is not concrete");
             }
-            injectIntoExistingOnEnable(onEnable, injectorOwner);
+            injectIntoExistingOnEnable(onEnable, injectorOwner, watermarkLanguage);
         }
 
         ClassWriter writer = new SafeClassWriter(classReader, CLASS_WRITER_FLAGS, getClass().getClassLoader());
@@ -255,6 +272,8 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
             MethodInsnNode methodInstruction = (MethodInsnNode) instruction;
             boolean matchingSignature =
                     ("installFor".equals(methodInstruction.name) && "(Ljava/lang/Object;)Z".equals(methodInstruction.desc))
+                            || ("installFor".equals(methodInstruction.name)
+                            && "(Ljava/lang/Object;Ljava/lang/String;)Z".equals(methodInstruction.desc))
                             || ("install".equals(methodInstruction.name) && "()V".equals(methodInstruction.desc));
             if (!matchingSignature) {
                 continue;
@@ -267,18 +286,13 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
         return false;
     }
 
-    private void injectIntoExistingOnEnable(MethodNode onEnableMethod, String injectorOwner) {
-        InjectionBlock block = createInjectionBlock(injectorOwner);
+    private void injectIntoExistingOnEnable(MethodNode onEnableMethod, String injectorOwner, String watermarkLanguage) {
+        InjectionBlock block = createInjectionBlock(injectorOwner, watermarkLanguage);
         onEnableMethod.instructions.insert(block.instructions);
-        onEnableMethod.tryCatchBlocks.add(0, new TryCatchBlockNode(
-                block.tryStart,
-                block.tryEnd,
-                block.catchHandler,
-                "java/lang/Throwable"
-        ));
+        addTryCatchBlocks(onEnableMethod, block);
     }
 
-    private MethodNode createOnEnableMethod(ClassNode classNode, String injectorOwner) {
+    private MethodNode createOnEnableMethod(ClassNode classNode, String injectorOwner, String watermarkLanguage) {
         MethodNode onEnableMethod = new MethodNode(Opcodes.ACC_PUBLIC, "onEnable", "()V", null, null);
 
         if (classNode.superName != null && !"java/lang/Object".equals(classNode.superName)) {
@@ -292,26 +306,60 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
             ));
         }
 
-        InjectionBlock block = createInjectionBlock(injectorOwner);
+        InjectionBlock block = createInjectionBlock(injectorOwner, watermarkLanguage);
         onEnableMethod.instructions.add(block.instructions);
-        onEnableMethod.tryCatchBlocks.add(new TryCatchBlockNode(
-                block.tryStart,
-                block.tryEnd,
-                block.catchHandler,
-                "java/lang/Throwable"
-        ));
+        onEnableMethod.tryCatchBlocks.addAll(block.tryCatchBlocks);
         onEnableMethod.instructions.add(new InsnNode(Opcodes.RETURN));
         return onEnableMethod;
     }
 
-    private InjectionBlock createInjectionBlock(String injectorOwner) {
-        InsnList instructions = new InsnList();
-        LabelNode tryStart = new LabelNode();
-        LabelNode tryEnd = new LabelNode();
-        LabelNode catchHandler = new LabelNode();
-        LabelNode afterCatch = new LabelNode();
+    private void addTryCatchBlocks(MethodNode methodNode, InjectionBlock block) {
+        if (block.tryCatchBlocks.isEmpty()) {
+            return;
+        }
 
-        instructions.add(tryStart);
+        for (int index = block.tryCatchBlocks.size() - 1; index >= 0; index--) {
+            methodNode.tryCatchBlocks.add(0, block.tryCatchBlocks.get(index));
+        }
+    }
+
+    private InjectionBlock createInjectionBlock(String injectorOwner, String watermarkLanguage) {
+        InsnList instructions = new InsnList();
+        List<TryCatchBlockNode> tryCatchBlocks = new ArrayList<TryCatchBlockNode>();
+
+        LabelNode languageTryStart = new LabelNode();
+        LabelNode languageTryEnd = new LabelNode();
+        LabelNode languageCatchHandler = new LabelNode();
+        LabelNode afterLanguageCatch = new LabelNode();
+
+        instructions.add(languageTryStart);
+        instructions.add(new LdcInsnNode(watermarkLanguage));
+        instructions.add(new MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                injectorOwner,
+                "configureWatermarkLanguage",
+                "(Ljava/lang/String;)V",
+                false
+        ));
+        instructions.add(languageTryEnd);
+        instructions.add(new JumpInsnNode(Opcodes.GOTO, afterLanguageCatch));
+        instructions.add(languageCatchHandler);
+        instructions.add(new InsnNode(Opcodes.POP));
+        instructions.add(afterLanguageCatch);
+
+        tryCatchBlocks.add(new TryCatchBlockNode(
+                languageTryStart,
+                languageTryEnd,
+                languageCatchHandler,
+                "java/lang/Throwable"
+        ));
+
+        LabelNode installTryStart = new LabelNode();
+        LabelNode installTryEnd = new LabelNode();
+        LabelNode installCatchHandler = new LabelNode();
+        LabelNode afterInstallCatch = new LabelNode();
+
+        instructions.add(installTryStart);
         instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
         instructions.add(new MethodInsnNode(
                 Opcodes.INVOKESTATIC,
@@ -321,13 +369,20 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
                 false
         ));
         instructions.add(new InsnNode(Opcodes.POP));
-        instructions.add(tryEnd);
-        instructions.add(new JumpInsnNode(Opcodes.GOTO, afterCatch));
-        instructions.add(catchHandler);
+        instructions.add(installTryEnd);
+        instructions.add(new JumpInsnNode(Opcodes.GOTO, afterInstallCatch));
+        instructions.add(installCatchHandler);
         instructions.add(new InsnNode(Opcodes.POP));
-        instructions.add(afterCatch);
+        instructions.add(afterInstallCatch);
 
-        return new InjectionBlock(instructions, tryStart, tryEnd, catchHandler);
+        tryCatchBlocks.add(new TryCatchBlockNode(
+                installTryStart,
+                installTryEnd,
+                installCatchHandler,
+                "java/lang/Throwable"
+        ));
+
+        return new InjectionBlock(instructions, tryCatchBlocks);
     }
 
     private JarSnapshot readJar(Path jarPath) throws IOException {
@@ -475,6 +530,14 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
         return normalized.replace('.', '/');
     }
 
+    private String normalizeLanguageTag(String languageTag) {
+        String normalized = trimToNull(languageTag);
+        if (normalized == null) {
+            return "en";
+        }
+        return normalized.replace('_', '-').toLowerCase(Locale.ROOT);
+    }
+
     private String trimToNull(String value) {
         if (value == null) {
             return null;
@@ -524,15 +587,11 @@ public abstract class InjectEndCrystalWatermarkTask extends DefaultTask {
 
     private static final class InjectionBlock {
         private final InsnList instructions;
-        private final LabelNode tryStart;
-        private final LabelNode tryEnd;
-        private final LabelNode catchHandler;
+        private final List<TryCatchBlockNode> tryCatchBlocks;
 
-        private InjectionBlock(InsnList instructions, LabelNode tryStart, LabelNode tryEnd, LabelNode catchHandler) {
+        private InjectionBlock(InsnList instructions, List<TryCatchBlockNode> tryCatchBlocks) {
             this.instructions = instructions;
-            this.tryStart = tryStart;
-            this.tryEnd = tryEnd;
-            this.catchHandler = catchHandler;
+            this.tryCatchBlocks = tryCatchBlocks;
         }
     }
 

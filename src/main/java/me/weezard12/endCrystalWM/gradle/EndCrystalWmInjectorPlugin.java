@@ -11,6 +11,7 @@ import java.io.File;
 public final class EndCrystalWmInjectorPlugin implements Plugin<Project> {
     private static final String EXTENSION_NAME = "endCrystalWmInjector";
     private static final String DEFAULT_INJECTOR_OWNER = "me/weezard12/endCrystalWM/EndCrystalWM";
+    private static final String DEFAULT_WATERMARK_LANGUAGE = "en";
     private static final String DEFAULT_RUNTIME_CONFIGURATION = "implementation";
     private static final String RUNTIME_COORDINATE_GROUP = "com.github.weezard12";
     private static final String RUNTIME_COORDINATE_ARTIFACT = "EndCrystalWM";
@@ -23,6 +24,11 @@ public final class EndCrystalWmInjectorPlugin implements Plugin<Project> {
 
         extension.getEnabled().convention(true);
         extension.getInjectorOwnerInternalName().convention(DEFAULT_INJECTOR_OWNER);
+        extension.getWatermarkLanguage().convention(
+                project.getProviders()
+                        .gradleProperty("endCrystalWmLanguage")
+                        .orElse(DEFAULT_WATERMARK_LANGUAGE)
+        );
         extension.getFailOnMissingPluginYml().convention(true);
         extension.getFailOnMissingMainClass().convention(true);
         extension.getAutoAddRuntimeDependency().convention(true);
@@ -70,6 +76,7 @@ public final class EndCrystalWmInjectorPlugin implements Plugin<Project> {
             injectTask.dependsOn(archiveTaskProvider);
             injectTask.getTargetJar().set(archiveTaskProvider.map(archiveTask -> archiveTask.getArchiveFile().get()));
             injectTask.getInjectorOwnerInternalName().set(extension.getInjectorOwnerInternalName());
+            injectTask.getWatermarkLanguage().set(extension.getWatermarkLanguage());
             injectTask.getMainClassOverride().set(extension.getMainClassOverride());
             injectTask.getFailOnMissingPluginYml().set(extension.getFailOnMissingPluginYml());
             injectTask.getFailOnMissingMainClass().set(extension.getFailOnMissingMainClass());

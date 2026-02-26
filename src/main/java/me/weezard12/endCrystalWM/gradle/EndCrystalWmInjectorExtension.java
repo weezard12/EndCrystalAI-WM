@@ -9,6 +9,8 @@ public abstract class EndCrystalWmInjectorExtension {
 
     public abstract Property<String> getInjectorOwnerInternalName();
 
+    public abstract Property<String> getWatermarkLanguage();
+
     public abstract Property<Boolean> getFailOnMissingPluginYml();
 
     public abstract Property<Boolean> getFailOnMissingMainClass();
