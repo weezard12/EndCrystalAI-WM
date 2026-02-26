@@ -6,6 +6,7 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -1752,11 +1753,43 @@ public final class EndCrystalWM {
 
         for (String constantName : constantNames) {
             Object constant = enumConstant(enumClass, constantName);
+            if (constant == null) {
+                constant = staticFieldConstant(enumClass, constantName);
+            }
+            if (constant == null) {
+                constant = invokeStatic(
+                        enumClass.getName(),
+                        "valueOf",
+                        new Class<?>[]{String.class},
+                        new Object[]{constantName}
+                );
+            }
             if (constant != null) {
                 return constant;
             }
         }
         return null;
+    }
+
+    private static Object staticFieldConstant(Class<?> ownerClass, String fieldName) {
+        try {
+            Field field = ownerClass.getField(fieldName);
+            if ((field.getModifiers() & Modifier.STATIC) == 0) {
+                return null;
+            }
+            return field.get(null);
+        } catch (Throwable ignored) {
+            try {
+                Field field = ownerClass.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                if ((field.getModifiers() & Modifier.STATIC) == 0) {
+                    return null;
+                }
+                return field.get(null);
+            } catch (Throwable ignoredAgain) {
+                return null;
+            }
+        }
     }
 
     private static final class WatermarkLocale {
